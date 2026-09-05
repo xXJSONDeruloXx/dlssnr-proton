@@ -22,6 +22,11 @@ build/nr-backend: src/backend.cpp src/protocol.h | build
 build/probe.exe: tests/probe.c | build
 	$(WINCC) -O2 -std=c11 -Wall -Wextra -o $@ $<
 
+# Development-only prerequisite for same-frame mode; not part of the release.
+build/interop-probe: tests/interop.cpp | build
+	$(CXX) $(CXXFLAGS) -Wno-missing-field-initializers $(VULKAN_CFLAGS) -I$(ROCM_ROOT)/include -o $@ $< \
+	-L$(ROCM_LIB) -Wl,-rpath-link,$(ROCM_LIB) $(EXTRA_LDFLAGS) -lamdhip64 -lvulkan
+
 test:
 	python3 -m unittest discover -s tests -p 'test_*.py'
 
