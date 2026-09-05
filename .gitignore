@@ -1,0 +1,11 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.dll
+*.exe
+*.so
+*.bin
+*.raw
+*.log
+.DS_Store

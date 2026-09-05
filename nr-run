@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Launch the pinned neural renderer with a private, per-user HIP runtime."""
+import argparse
+import concurrent.futures
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+VERSION = '0.1.0-alpha.1'
+MODEL_SHA = 'dcc0dc2414aedec4a8e084647070383be068554042587180c20c784d4772d36f'
+WEIGHTS_SHA = '6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8eabaa25dca5cf15ab'
+INSTALLER_SHA = '5a28d907bba471504c6c7be6901a4eb6610f46b4d86ecb23b0430ba8bf3fc5d5'
+INSTALLER_URL = 'https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download/v0.2.10/dlssnr_on_amd_setup.exe'
+HOST_SHA = '26fe30c10c719f491acb75002bed0e84c1e8793fe93ca1590e1cd8d4144a510e'
+KERNEL_SHA = '12fdd63876ad0cf9b70c947d369bd8b0ed00aa2345021076d72a008dc8e1f4cd'
+ROOT = Path(__file__).resolve().parent
+SETTINGS = ('[DlssNrOnAmd]\nEnabled=1\nLocalTone=0\nLocalStructure=1\n'
+            'SkinStructure=-1\nUseAutoMask=1\nToneChannels=0\nScale=0.03125\n'
+            'Temporal=1\nTonemap=-1\nUseFsrInputs=1\nUseDepth=1\n'
+            'Interop=0\nInline=0\nHipDevice=0\n')
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+@contextlib.contextmanager
+def locked(path):
+    with path.open('a') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Another renderer launch or setup is active.')
+        yield
+
+
+def atomic_bytes(path, data, expected=None):
+    if expected and hashlib.sha256(data).hexdigest() != expected:
+        raise RuntimeError('Payload hash mismatch: ' + path.name)
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def download(url, path, expected):
+    if path.is_file() and digest(path) == expected:
+        return
+    print('Downloading ' + path.name, flush=True)
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    try:
+        request = urllib.request.Request(url, headers={'User-Agent': 'dlssnr-proton/' + VERSION})
+        with os.fdopen(fd, 'wb') as out, urllib.request.urlopen(request, timeout=60) as response:
+            shutil.copyfileobj(response, out)
+        if digest(Path(name)) != expected:
+            raise RuntimeError('Download hash mismatch: ' + path.name)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def prepare_runtime(cache):
+    manifest = json.loads((ROOT / 'runtime.json').read_text())
+    downloads, lib = cache / 'downloads', cache / 'lib'
+    downloads.mkdir(exist_ok=True)
+    lib.mkdir(exist_ok=True)
+    # A receipt is only accepted when every extracted library still matches.
+    receipt = cache / 'libraries.json'
+    manifest_sha = digest(ROOT / 'runtime.json')
+    if receipt.is_file():
+        saved = json.loads(receipt.read_text())
+        expected_names = {name for package in manifest['packages'] for name in package['files']}
+        if saved.get('manifest') == manifest_sha and set(saved.get('files', {})) == expected_names and all(
+                (lib / name).is_file() and digest(lib / name) == sha
+                for name, sha in saved['files'].items()):
+            return lib
+
+    def fetch(package):
+        path = downloads / package['file']
+        download(manifest['base_url'] + package['file'], path, package['sha256'])
+        return package, path
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        packages = list(pool.map(fetch, manifest['packages']))
+    hashes = {}
+    for package, archive in packages:
+        for name, member in package['files'].items():
+            # Extract only explicitly named regular files to explicitly chosen
+            # destinations. Never unpack an archive's paths or symlinks.
+            fd, temporary = tempfile.mkstemp(dir=lib)
+            try:
+                with os.fdopen(fd, 'wb') as out:
+                    subprocess.run(['tar', '--zstd', '-xOf', str(archive), member],
+                                   stdout=out, check=True)
+                if not Path(temporary).stat().st_size:
+                    raise RuntimeError('Empty runtime library: ' + name)
+                os.replace(temporary, lib / name)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            hashes[name] = digest(lib / name)
+    atomic_bytes(receipt, json.dumps({'manifest': manifest_sha, 'files': hashes}).encode())
+    return lib
+
+
+def prepare_host(cache):
+    host, kernel = cache / 'version.dll', cache / 'gfx1201.co'
+    if (host.is_file() and digest(host) == HOST_SHA and
+            kernel.is_file() and digest(kernel) == KERNEL_SHA):
+        return host, kernel
+    installer = cache / 'downloads' / 'dlssnr_on_amd_setup.exe'
+    download(INSTALLER_URL, installer, INSTALLER_SHA)
+    data = installer.read_bytes()
+    atomic_bytes(host, data[239616:239616 + 4549632], HOST_SHA)
+    atomic_bytes(kernel, data[4269056:4269056 + 505096], KERNEL_SHA)
+    return host, kernel
+
+
+def prepare_weights(model, cache):
+    if digest(model) != MODEL_SHA:
+        raise RuntimeError('Unsupported NVIDIA DLL. Use the exact version/hash in README.md.')
+    weights = cache / 'weights.bin'
+    if weights.is_file() and digest(weights) == WEIGHTS_SHA:
+        return weights
+    data = model.read_bytes()
+    resource = memoryview(data)[18129248:18129248 + 147695410]
+    labels = list(re.finditer(rb'block[0-9]+\.layer[0-9]+\.(?:layer|blend_scale)', resource))
+    if len(labels) != 153:
+        raise RuntimeError('Unexpected tensor count.')
+    entries, index, offset = [], bytearray(), 0
+    for label in labels:
+        name = label.group()
+        size = struct.unpack_from('<Q', resource, label.end() + 16)[0]
+        start = label.end() + 28
+        if start + size > len(resource):
+            raise RuntimeError('Tensor exceeds resource.')
+        entries.append((start, size))
+        index += bytes([len(name)]) + name + struct.pack('<QQ', offset, size)
+        offset += size
+    fd, temporary = tempfile.mkstemp(dir=cache)
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            out.write(struct.pack('<8sII', b'DLSSNRW1', len(entries), 16 + len(index)))
+            out.write(index)
+            for start, size in entries:
+                out.write(resource[start:start + size])
+        if digest(Path(temporary)) != WEIGHTS_SHA:
+            raise RuntimeError('Converted weights do not match the independently verified runtime output.')
+        os.replace(temporary, weights)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return weights
+
+
+def game_directory(command, explicit=None):
+    if explicit:
+        result = Path(explicit).resolve()
+        if not result.is_dir():
+            raise RuntimeError('--game-dir is not a directory.')
+        return result
+    executables = [Path(arg).resolve() for arg in command
+                   if arg.lower().endswith('.exe') and Path(arg).is_file()]
+    if executables:
+        return executables[-1].parent
+    raise RuntimeError('Cannot find the game executable in the Steam command; supply --game-dir.')
+
+
+class Staging:
+    """Own only links created by this invocation; never overwrite a mod."""
+    def __init__(self, game, files):
+        self.game, self.files, self.created = game, files, []
+
+    def __enter__(self):
+        for name in self.files:
+            if os.path.lexists(self.game / name):
+                raise RuntimeError('Conflicting game file (preserved): ' + str(self.game / name))
+        try:
+            for name, source in self.files.items():
+                destination = self.game / name
+                destination.symlink_to(source)
+                self.created.append((destination, str(source)))
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *unused):
+        for path, source in reversed(self.created):
+            if path.is_symlink() and os.readlink(path) == source:
+                path.unlink()
+
+
+def wait_ready(process, log, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError('HIP backend exited. See ' + str(log))
+        text = log.read_text(errors='replace')
+        match = re.search(r'ready: loopback port=(\d+)', text)
+        if match:
+            return match[1]
+        time.sleep(.05)
+    raise RuntimeError('HIP backend did not become ready. See ' + str(log))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', type=Path, required=True)
+    parser.add_argument('--game-dir')
+    parser.add_argument('--prepare', action='store_true', help='download and validate without launching')
+    parser.add_argument('--check', action='store_true', help='also check native GPU/code-object support')
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command and not (args.prepare or args.check):
+        parser.error('append the Steam game command, or use --prepare/--check')
+    if not args.model.is_file():
+        parser.error('model DLL does not exist')
+    # Fail on a wrong model before downloading anything.
+    if digest(args.model) != MODEL_SHA:
+        raise RuntimeError('Unsupported model SHA-256; see README.md.')
+    binary_dir = ROOT / 'build' if (ROOT / 'build' / 'nr-backend').is_file() else ROOT
+    backend, client = binary_dir / 'nr-backend', binary_dir / 'amdhip64_7.dll'
+    if not backend.is_file() or not client.is_file():
+        raise RuntimeError('Bridge binaries missing. Extract a release or run make.')
+    os.umask(0o077)
+    cache = (Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache'))) /
+             'dlssnr-proton' / VERSION).resolve()
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with locked(cache / 'setup.lock'):
+        lib = prepare_runtime(cache)
+        host, kernel = prepare_host(cache)
+        weights = prepare_weights(args.model, cache)
+    env = dict(os.environ, LD_LIBRARY_PATH=str(lib), DLSSNR_HIP_TOKEN=secrets.token_hex(32))
+    if args.check:
+        subprocess.run([str(backend), str(kernel), '0', '--check'], env=env, check=True)
+    if not command:
+        print('Ready: ' + str(cache))
+        return 0
+    game = game_directory(command, args.game_dir)
+    settings = cache / 'settings.ini'
+    if not settings.exists():
+        atomic_bytes(settings, SETTINGS.encode())
+    session = Path(tempfile.mkdtemp(prefix='session-', dir=cache))
+    log = session / 'backend.log'
+    with locked(cache / 'session.lock'), log.open('wb') as output:
+        process = subprocess.Popen([str(backend), str(kernel), '0'], env=env,
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            port = wait_ready(process, log)
+            credential = session / 'credential'
+            atomic_bytes(credential, (port + '\n' + env['DLSSNR_HIP_TOKEN'] + '\n').encode())
+            runtime_log = session / 'runtime.log'
+            runtime_log.touch(mode=0o600)
+            files = {'version.dll': host, 'amdhip64_7.dll': client,
+                     'dlssnr_on_amd_weights.bin': weights, 'dlssnr_on_amd.ini': settings,
+                     '.dlssnr-hip-session': credential, 'dlssnr_on_amd.log': runtime_log}
+            with Staging(game, files):
+                game_env = dict(os.environ)
+                overrides = game_env.get('WINEDLLOVERRIDES', '')
+                game_env['WINEDLLOVERRIDES'] = overrides + (';' if overrides else '') + 'version=n,b;amdhip64_7=n'
+                game_env['DLSSNR_HIP_PORT'] = port
+                game_env['DLSSNR_HIP_TOKEN'] = env['DLSSNR_HIP_TOKEN']
+                print('DLSSNR async staging enabled. Logs: ' + str(session), flush=True)
+                child = subprocess.Popen(command, env=game_env, start_new_session=True)
+                try:
+                    return child.wait()
+                except BaseException:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGTERM)
+                        try:
+                            child.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(child.pid, signal.SIGKILL)
+                            child.wait()
+                    raise
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+if __name__ == '__main__':
+    # SIGTERM follows the same cleanup path as an interactive cancellation.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print('nr-run: ' + str(error), file=sys.stderr)
+        sys.exit(1)

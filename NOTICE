@@ -1,0 +1,17 @@
+dlssnr-proton's bridge and launcher are GPL-3.0-only. See LICENSE.
+
+This project uses the separately downloaded DLSS-NR-on-AMD v0.2.10 runtime
+by Daniel B. (https://github.com/danielblnc/DLSS-NR-on-AMD). That runtime
+provides the neural graph and AMD kernels; it is not included in our source
+or release. The NVIDIA model DLL and extracted model data are also excluded.
+
+The launcher downloads unmodified, hash-pinned ROCm and support packages
+directly from the SteamOS package mirror. Their original archives, including
+license material, remain in the local download cache. No system packages
+are installed. Runtime downloads remain subject to their upstream licenses.
+
+The Windows bridge includes MinGW-w64 runtime code (see licenses/mingw-w64.txt)
+and GCC runtime components under GPLv3 with the GCC Runtime Library Exception
+3.1 (see licenses/gcc-runtime-exception.txt). The winpthreads runtime carries
+the notices in licenses/winpthreads.txt. Build dependencies retain their
+respective licenses. No association with NVIDIA, AMD, or Valve is implied.
