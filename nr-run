@@ -227,6 +227,65 @@ def wait_ready(process, log, timeout=15):
     raise RuntimeError('HIP backend did not become ready. See ' + str(log))
 
 
+def wait_native_ready(process, log, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError('Native host exited. See ' + str(log))
+        text = log.read_text(errors='replace')
+        match = re.search(r'ready: native port=(\d+)', text)
+        if match:
+            return match[1]
+        time.sleep(.05)
+    raise RuntimeError('Native host did not become ready. See ' + str(log))
+
+
+def run_native_session(model, library, command, binary_dir):
+    if not library or not library.is_file():
+        raise RuntimeError('--native-session requires an existing --native-library.')
+    if digest(model) != NATIVE_MODEL_SHA:
+        raise RuntimeError('Native runtime currently requires the portable-profile DLSSNR DLL.')
+    host = binary_dir / 'nr-native-host'
+    if not host.is_file():
+        raise RuntimeError('Native host missing. Extract a release or run make native-host.')
+    os.umask(0o077)
+    root = (Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache'))) /
+            'dlssnr-proton' / 'native').resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    session = Path(tempfile.mkdtemp(prefix='session-', dir=root))
+    log = session / 'native-host.log'
+    token = secrets.token_hex(32)
+    env = dict(os.environ, DLSSNR_NATIVE_TOKEN=token)
+    with log.open('wb') as output:
+        process = subprocess.Popen([str(host), str(library.resolve()), str(model.resolve())],
+                                   env=env, stdout=output, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            port = wait_native_ready(process, log)
+            game_env = dict(os.environ, DLSSNR_NATIVE_PORT=port, DLSSNR_NATIVE_TOKEN=token)
+            print('DLSSNR native host ready. Logs: ' + str(session), flush=True)
+            child = subprocess.Popen(command, env=game_env, start_new_session=True)
+            try:
+                return child.wait()
+            except BaseException:
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGTERM)
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait()
+                raise
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', type=Path, required=True)
@@ -235,6 +294,7 @@ def main():
     parser.add_argument('--check', action='store_true', help='also check native GPU/code-object support')
     parser.add_argument('--native-library', type=Path, help='libdlssnr-native.so for the clean native path')
     parser.add_argument('--native-check', action='store_true', help='validate the clean Linux shared runtime and exit')
+    parser.add_argument('--native-session', action='store_true', help='launch a game with the Linux native host control plane')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
@@ -242,6 +302,10 @@ def main():
         parser.error('append the Steam game command, or use --prepare/--check/--native-check')
     if args.native_check and command:
         parser.error('--native-check is a standalone validation action')
+    if args.native_session and not command:
+        parser.error('--native-session requires a game command')
+    if args.native_session and (args.prepare or args.check or args.native_check):
+        parser.error('--native-session cannot be combined with preparation/check modes')
     if not args.model.is_file():
         parser.error('model DLL does not exist')
     binary_dir = ROOT / 'build' if (ROOT / 'build' / 'nr-backend').is_file() else ROOT
@@ -256,6 +320,8 @@ def main():
         subprocess.run([str(probe), str(args.native_library.resolve()), str(args.model.resolve())],
                        check=True)
         return 0
+    if args.native_session:
+        return run_native_session(args.model, args.native_library, command, binary_dir)
     # Fail on a wrong HIP-path model before downloading anything.
     if digest(args.model) != MODEL_SHA:
         raise RuntimeError('Unsupported model SHA-256; see README.md.')
