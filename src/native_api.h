@@ -6,6 +6,13 @@ typedef struct dlssnr_model dlssnr_model;
 typedef struct dlssnr_runtime dlssnr_runtime;
 
 typedef struct {
+    uint32_t model_tensors;
+    uint32_t required_tensors;
+    uint32_t present_required_tensors;
+    uint32_t auxiliary_tensors;
+} NrStage1Inventory;
+
+typedef struct {
     void *library;
     uint32_t (*abi_version)(void);
     int (*model_open)(const char *, dlssnr_model **);
@@ -14,6 +21,7 @@ typedef struct {
     uint32_t (*model_tensor_count)(const dlssnr_model *);
     const char *(*model_dll_sha256)(const dlssnr_model *);
     const char *(*model_weights_sha256)(const dlssnr_model *);
+    int (*model_stage1_inventory)(const dlssnr_model *, NrStage1Inventory *);
     int (*runtime_create)(dlssnr_runtime **);
     void (*runtime_destroy)(dlssnr_runtime *);
     const char *(*runtime_device_name)(const dlssnr_runtime *);
