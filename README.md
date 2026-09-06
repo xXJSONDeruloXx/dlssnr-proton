@@ -30,6 +30,28 @@ The check dynamically loads ABI v1, opens the raw user-provided DLL directly,
 verifies its model inventory, creates the Vulkan runtime, binds the model, and
 prints the selected GPU. It does **not** claim Stage-1 inference is wired yet.
 
+For an integration smoke test, the launcher can keep the Linux runtime alive
+while starting the Proton game:
+
+```sh
+make native-host
+./nr-run \
+  --model /path/to/nvngx_dlssnr.dll \
+  --native-library /path/to/libdlssnr-native.so \
+  --native-session -- %command%
+```
+
+`--native-session` starts an authenticated loopback host, exports its
+port/token into the game environment, then cleans the host up when the game
+exits. A compatible `dlss5-linux-bridge` native-control build must already be
+installed in the game/prefix for the Windows NGX proxy to connect. This path
+does not download the HIP runtime or stage its Windows HIP shim.
+
+The current native-host capability mask is zero: this validates model ownership,
+Linux Vulkan runtime creation, and the Proton control plane only. Native frame
+evaluation/resource sharing is not implemented yet, so the proxy retains the
+standard game output.
+
 The clean shared-runtime path is currently pinned to the independently
 reconstructed portable profile SHA-256
 `6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927f`.
