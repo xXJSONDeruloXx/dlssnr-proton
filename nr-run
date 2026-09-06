@@ -308,7 +308,7 @@ def main():
         parser.error('--native-session cannot be combined with preparation/check modes')
     if not args.model.is_file():
         parser.error('model DLL does not exist')
-    binary_dir = ROOT / 'build' if (ROOT / 'build' / 'nr-backend').is_file() else ROOT
+    binary_dir = ROOT / 'build' if (ROOT / 'build').is_dir() else ROOT
     if args.native_check:
         if not args.native_library or not args.native_library.is_file():
             raise RuntimeError('--native-check requires an existing --native-library.')
