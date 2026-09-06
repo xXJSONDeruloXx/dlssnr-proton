@@ -31,6 +31,7 @@ int nr_native_api_open(const char *path, NrNativeApi *api, char *error, size_t e
     RESOLVE(model_tensor_count,"dlssnr_model_tensor_count");
     RESOLVE(model_dll_sha256,"dlssnr_model_dll_sha256");
     RESOLVE(model_weights_sha256,"dlssnr_model_weights_sha256");
+    RESOLVE(model_stage1_inventory,"dlssnr_model_stage1_inventory");
     RESOLVE(runtime_create,"dlssnr_runtime_create");
     RESOLVE(runtime_destroy,"dlssnr_runtime_destroy");
     RESOLVE(runtime_device_name,"dlssnr_runtime_device_name");
