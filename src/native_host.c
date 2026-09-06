@@ -38,6 +38,11 @@ int main(int argc, char **argv) {
     if (api.model_open(argv[2],&model)) {
         fprintf(stderr,"model open failed\n");nr_native_api_close(&api);return 3;
     }
+    NrStage1Inventory inventory;
+    if (api.model_stage1_inventory(model,&inventory)) {
+        fprintf(stderr,"stage1 inventory failed\n");
+        api.model_close(model);nr_native_api_close(&api);return 4;
+    }
     dlssnr_runtime *runtime=NULL;
     if (api.runtime_create(&runtime) || api.runtime_set_model(runtime,model)) {
         fprintf(stderr,"runtime setup failed\n");
@@ -55,10 +60,11 @@ int main(int argc, char **argv) {
     if (bind(listener,(struct sockaddr *)&address,sizeof(address)) || listen(listener,1)) goto socket_fail;
     socklen_t address_size=sizeof(address);
     if (getsockname(listener,(struct sockaddr *)&address,&address_size)) goto socket_fail;
-    printf("ready: native port=%u abi=%u source=%d tensors=%u device=%s\n",
+    printf("ready: native port=%u abi=%u source=%d tensors=%u stage1=%u/%u auxiliary=%u device=%s\n",
            (unsigned)ntohs(address.sin_port),api.abi_version(),
            api.model_source_kind(model),api.model_tensor_count(model),
-           api.runtime_device_name(runtime));
+           inventory.present_required_tensors,inventory.required_tensors,
+           inventory.auxiliary_tensors,api.runtime_device_name(runtime));
     fflush(stdout);
 
     int client=accept(listener,NULL,NULL);
@@ -81,6 +87,9 @@ int main(int argc, char **argv) {
             packet.a[1]=(uint64_t)api.model_source_kind(model);
             packet.a[2]=api.model_tensor_count(model);
             packet.a[3]=0;
+            packet.a[4]=inventory.present_required_tensors;
+            packet.a[5]=inventory.required_tensors;
+            packet.a[6]=inventory.auxiliary_tensors;
             snprintf(packet.text,sizeof(packet.text),
                      "device=%s\ndll_sha256=%s\nweights_sha256=%s",
                      api.runtime_device_name(runtime),api.model_dll_sha256(model),
