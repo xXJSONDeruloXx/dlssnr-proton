@@ -21,6 +21,7 @@ import urllib.request
 
 VERSION = '0.1.0-alpha.1'
 MODEL_SHA = 'dcc0dc2414aedec4a8e084647070383be068554042587180c20c784d4772d36f'
+NATIVE_MODEL_SHA = '6eb209e764f39872625debd6abaf45e2bb6322f6f270f781f70c059ae30b3927f'
 WEIGHTS_SHA = '6bf8dc931ef3ccffe18c82de26ab374156e7f19539ffcf8eabaa25dca5cf15ab'
 INSTALLER_SHA = '5a28d907bba471504c6c7be6901a4eb6610f46b4d86ecb23b0430ba8bf3fc5d5'
 INSTALLER_URL = 'https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download/v0.2.10/dlssnr_on_amd_setup.exe'
@@ -232,17 +233,32 @@ def main():
     parser.add_argument('--game-dir')
     parser.add_argument('--prepare', action='store_true', help='download and validate without launching')
     parser.add_argument('--check', action='store_true', help='also check native GPU/code-object support')
+    parser.add_argument('--native-library', type=Path, help='libdlssnr-native.so for the clean native path')
+    parser.add_argument('--native-check', action='store_true', help='validate the clean Linux shared runtime and exit')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    if not command and not (args.prepare or args.check):
-        parser.error('append the Steam game command, or use --prepare/--check')
+    if not command and not (args.prepare or args.check or args.native_check):
+        parser.error('append the Steam game command, or use --prepare/--check/--native-check')
+    if args.native_check and command:
+        parser.error('--native-check is a standalone validation action')
     if not args.model.is_file():
         parser.error('model DLL does not exist')
-    # Fail on a wrong model before downloading anything.
+    binary_dir = ROOT / 'build' if (ROOT / 'build' / 'nr-backend').is_file() else ROOT
+    if args.native_check:
+        if not args.native_library or not args.native_library.is_file():
+            raise RuntimeError('--native-check requires an existing --native-library.')
+        if digest(args.model) != NATIVE_MODEL_SHA:
+            raise RuntimeError('Native runtime currently requires the portable-profile DLSSNR DLL.')
+        probe = binary_dir / 'nr-native-probe'
+        if not probe.is_file():
+            raise RuntimeError('Native probe missing. Extract a release or run make native-probe.')
+        subprocess.run([str(probe), str(args.native_library.resolve()), str(args.model.resolve())],
+                       check=True)
+        return 0
+    # Fail on a wrong HIP-path model before downloading anything.
     if digest(args.model) != MODEL_SHA:
         raise RuntimeError('Unsupported model SHA-256; see README.md.')
-    binary_dir = ROOT / 'build' if (ROOT / 'build' / 'nr-backend').is_file() else ROOT
     backend, client = binary_dir / 'nr-backend', binary_dir / 'amdhip64_7.dll'
     if not backend.is_file() or not client.is_file():
         raise RuntimeError('Bridge binaries missing. Extract a release or run make.')
