@@ -5,11 +5,12 @@ ROCM_ROOT ?= /opt/rocm
 ROCM_LIB ?= $(ROCM_ROOT)/lib
 CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra
 
-.PHONY: all client backend native-probe test release
-all: client backend native-probe
+.PHONY: all client backend native-probe native-host test release
+all: client backend native-probe native-host
 client: build/amdhip64_7.dll
 backend: build/nr-backend
 native-probe: build/nr-native-probe
+native-host: build/nr-native-host
 
 build:
 	mkdir -p build
@@ -22,6 +23,9 @@ build/nr-backend: src/backend.cpp src/protocol.h | build
 
 build/nr-native-probe: src/native_probe.c src/native_api.c src/native_api.h | build
 	$(CC) -O2 -std=c11 -Wall -Wextra -Werror -o $@ src/native_probe.c src/native_api.c -ldl
+
+build/nr-native-host: src/native_host.c src/native_api.c src/native_api.h src/native_protocol.h | build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Werror -o $@ src/native_host.c src/native_api.c -ldl
 
 build/probe.exe: tests/probe.c | build
 	$(WINCC) -O2 -std=c11 -Wall -Wextra -o $@ $<
