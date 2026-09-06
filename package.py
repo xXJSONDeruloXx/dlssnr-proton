@@ -10,6 +10,7 @@ NAME = 'dlssnr-proton-0.1.0-alpha.1-linux-x86_64'
 FILES = {'nr-run': ROOT / 'nr-run', 'runtime.json': ROOT / 'runtime.json',
          'nr-backend': ROOT / 'build/nr-backend',
          'nr-native-probe': ROOT / 'build/nr-native-probe',
+         'nr-native-host': ROOT / 'build/nr-native-host',
          'amdhip64_7.dll': ROOT / 'build/amdhip64_7.dll',
          'README.md': ROOT / 'README.md', 'LICENSE': ROOT / 'LICENSE',
          'NOTICE': ROOT / 'NOTICE'}
@@ -32,7 +33,7 @@ with archive.open('wb') as raw, gzip.GzipFile(filename='', mode='wb', fileobj=ra
             checksums.append(hashlib.sha256(data).hexdigest() + '  ' + name)
             info = tarfile.TarInfo(NAME + '/' + name)
             info.size = len(data)
-            info.mode = 0o755 if name in ('nr-run', 'nr-backend', 'nr-native-probe') else 0o644
+            info.mode = 0o755 if name in ('nr-run', 'nr-backend', 'nr-native-probe', 'nr-native-host') else 0o644
             tar.addfile(info, io.BytesIO(data))
         data = ('\n'.join(checksums) + '\n').encode()
         info = tarfile.TarInfo(NAME + '/SHA256SUMS')
