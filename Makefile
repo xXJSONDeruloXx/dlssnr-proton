@@ -20,8 +20,8 @@ build/amdhip64_7.dll: src/client.c src/protocol.h src/signatures.h | build
 build/nr-backend: src/backend.cpp src/protocol.h | build
 	$(CXX) $(CXXFLAGS) -I$(ROCM_ROOT)/include -o $@ $< 	-L$(ROCM_LIB) -Wl,-rpath-link,$(ROCM_LIB) $(EXTRA_LDFLAGS) -lamdhip64
 
-build/nr-native-probe: src/native_probe.c | build
-	$(CC) -O2 -std=c11 -Wall -Wextra -Werror -o $@ $< -ldl
+build/nr-native-probe: src/native_probe.c src/native_api.c src/native_api.h | build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Werror -o $@ src/native_probe.c src/native_api.c -ldl
 
 build/probe.exe: tests/probe.c | build
 	$(WINCC) -O2 -std=c11 -Wall -Wextra -o $@ $<
