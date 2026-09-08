@@ -1,0 +1,19 @@
+name: native-path-ci
+
+on:
+  push:
+    branches:
+      - feat/linux-shared-runtime
+  pull_request:
+
+jobs:
+  test-native-path:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native control tools
+        run: make native-probe native-host
+      - name: Run launcher tests
+        run: make test
+      - name: Check launcher syntax
+        run: python3 -m py_compile nr-run
